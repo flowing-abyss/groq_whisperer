@@ -18,8 +18,8 @@
 
 1. Clone the repository:
    ```
-   git clone https://github.com/KennyVaneetvelde/groq_whisperer
-   cd whisperer
+   git clone https://github.com/flowing-abyss/groq_whisperer
+   cd groq_whisperer
    ```
 
 2. Create a virtual environment:
@@ -42,14 +42,9 @@
    pip install -r requirements.txt
    ```
 
-5. Set up your Groq API key as an environment variable:
-   - On Windows:
+5. Set up your Groq API key (main.py):
      ```
-     setx GROQ_API_KEY "your-api-key-here"
-     ```
-   - On macOS and Linux:
-     ```
-     export GROQ_API_KEY="your-api-key-here"
+     client = Groq(api_key="API key")
      ```
 
 ## Usage
@@ -58,20 +53,17 @@
    ```
    python main.py
    ```
+   or
+   ```
+   run_background_admin.bat
+   ```
 
-2. Press and hold the PAUSE key to start recording.
-3. Release the PAUSE key to stop recording and start transcription.
-4. The transcribed text will be automatically copied to your clipboard.
+2. Press the "Pause" button to start recording.
+3. Press the "Pause" button to stop recording.
+4. The transcript will automatically be copied to the clipboard and can be pasted using Ctrl+V.
 5. Repeat steps 2-4 for additional recordings.
 
 ## Dependencies
-
-The project relies on the following main libraries:
-
-- `pyaudio`: For audio recording
-- `keyboard`: For detecting key presses
-- `pyautogui` and `pyperclip`: For clipboard operations
-- `groq`: For interacting with the Groq API
 
 For a complete list of dependencies, see the `requirements.txt` file.
 

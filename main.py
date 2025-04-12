@@ -3,17 +3,17 @@ import tempfile
 import wave
 import pyaudio
 import keyboard
-import pyautogui
 import pyperclip
+import winsound
+import time
 from groq import Groq
 
 # Set up Groq client
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-
+client = Groq(api_key="")
 
 def record_audio(sample_rate=16000, channels=1, chunk=1024):
     """
-    Record audio from the microphone while the PAUSE button is held down.
+    Record audio from the microphone between two PAUSE button presses.
     """
     p = pyaudio.PyAudio()
     stream = p.open(
@@ -24,15 +24,26 @@ def record_audio(sample_rate=16000, channels=1, chunk=1024):
         frames_per_buffer=chunk,
     )
 
-    print("Press and hold the PAUSE button to start recording...")
+    print("Press PAUSE to start recording...")
     frames = []
 
-    keyboard.wait("pause")  # Wait for PAUSE button to be pressed
-    print("Recording... (Release PAUSE to stop)")
+    keyboard.wait("pause")  # Wait for first PAUSE press
+    print("Recording... (Press PAUSE again to stop)")
+    winsound.Beep(1000, 200)  # Play start sound (1000Hz for 200ms)
 
-    while keyboard.is_pressed("pause"):
+    stop_recording = False
+    def on_pause_press(e):
+        nonlocal stop_recording
+        stop_recording = True
+    
+    keyboard.on_press_key("pause", on_pause_press)
+
+    while not stop_recording:
         data = stream.read(chunk)
         frames.append(data)
+
+    keyboard.unhook_all()  # Remove the event handler
+    winsound.Beep(2500, 200)  # Play stop sound (2500Hz for 200ms)
 
     print("Recording finished.")
     stream.stop_stream()
@@ -67,7 +78,7 @@ def transcribe_audio(audio_file_path):
                 model="whisper-large-v3",
                 prompt="""The audio is by a programmer discussing programming issues, the programmer mostly uses python and might mention python libraries or reference code in his speech.""",
                 response_format="text",
-                language="en",
+                language="ru",
             )
         return transcription  # This is now directly the transcription text
     except Exception as e:
@@ -77,10 +88,14 @@ def transcribe_audio(audio_file_path):
 
 def copy_transcription_to_clipboard(text):
     """
-    Copy the transcribed text to clipboard using pyperclip.
+    Copy the transcribed text to clipboard and paste it using keyboard simulation.
     """
-    pyperclip.copy(text)
-    pyautogui.hotkey("ctrl", "v")
+    try:
+        pyperclip.copy(text)
+        time.sleep(0.1)  # Small delay to ensure text is copied
+        keyboard.press_and_release('ctrl+v')
+    except Exception as e:
+        print(f"Error during copy/paste: {str(e)}")
 
 
 def main():
@@ -101,7 +116,7 @@ def main():
             print(transcription)
             print("Copying transcription to clipboard...")
             copy_transcription_to_clipboard(transcription)
-            print("Transcription copied to clipboard and pasted into the application.")
+            print("Transcription copied and pasted.")
         else:
             print("Transcription failed.")
 
