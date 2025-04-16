@@ -1,21 +1,21 @@
-from os import path, unlink
+from os import path, unlink, getenv
 from tempfile import NamedTemporaryFile
 import wave
 from pyaudio import PyAudio, paInt16
 from keyboard import wait, on_press_key, unhook_all, press_and_release
 from pyperclip import copy
-from winsound import Beep
+from playsound3 import playsound
 from time import sleep
 from groq import Groq
 from contextlib import contextmanager
 from dotenv import load_dotenv
-import os
+import asyncio
 
 # Load environment variables from .env file
 load_dotenv()
 
 # Set up Groq client
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+client = Groq(api_key=getenv("GROQ_API_KEY"))
 
 # Global PyAudio instance
 p = PyAudio()
@@ -36,6 +36,11 @@ def audio_stream(sample_rate=16000, channels=1, chunk=2048):
         stream.stop_stream()
         stream.close()
 
+async def play_sound_async(sound_file):
+    """Play sound asynchronously"""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, playsound, sound_file)
+
 def record_audio(sample_rate=16000, channels=1, chunk=2048):
     """
     Record audio from the microphone between two PAUSE button presses.
@@ -45,7 +50,7 @@ def record_audio(sample_rate=16000, channels=1, chunk=2048):
 
     wait("pause")  # Wait for first PAUSE press
     print("Recording... (Press PAUSE again to stop)")
-    Beep(1000, 200)  # Play start sound (1000Hz for 200ms)
+    asyncio.run(play_sound_async("start.mp3"))  # Play start sound asynchronously
 
     stop_recording = False
     def on_pause_press(e):
@@ -68,7 +73,7 @@ def record_audio(sample_rate=16000, channels=1, chunk=2048):
         return None, None
     finally:
         unhook_all()  # Remove the event handler
-        Beep(2000, 200)  # Play stop sound (2500Hz for 200ms)
+        asyncio.run(play_sound_async("stop.mp3"))  # Play stop sound asynchronously
 
     print("Recording finished.")
     return frames, sample_rate
