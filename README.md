@@ -4,7 +4,7 @@
 
 ## Features
 
-- Record audio by holding down the **PAUSE** key
+- Record audio by pressing the **PAUSE** key
 - Transcribe recorded audio to text using Groq's API
 - Automatically copy transcription to clipboard
 - Continuous operation for multiple recordings
@@ -12,7 +12,7 @@
 ## Prerequisites
 
 - Python 3.7 or higher
-- A Groq API key (set as an environment variable)
+- A Groq API key
 
 ## Installation
 
@@ -24,17 +24,17 @@
 
 2. Create a virtual environment:
    ```
-   python -m venv venv
+   python -m venv .venv
    ```
 
 3. Activate the virtual environment:
    - On Windows:
      ```
-     venv\Scripts\activate
+     .venv\Scripts\activate
      ```
    - On macOS and Linux:
      ```
-     source venv/bin/activate
+     source .venv/bin/activate
      ```
 
 4. Install the required packages:
