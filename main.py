@@ -1,27 +1,103 @@
-from os import path, unlink, getenv
-from tempfile import NamedTemporaryFile
-import wave
-from pyaudio import PyAudio, paInt16
-from keyboard import wait, on_press_key, unhook_all, press_and_release
-from pyperclip import copy
-from playsound3 import playsound
-from time import sleep
-from groq import Groq
-from contextlib import contextmanager
-from dotenv import load_dotenv
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import logging
+import signal
+import sys
+import time
+import wave
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from os import getenv, path, unlink
+from tempfile import NamedTemporaryFile
+
+from dotenv import load_dotenv
+from groq import Groq
+from keyboard import on_press_key, press_and_release, unhook_all, wait
+from playsound3 import playsound
+from pyaudio import PyAudio, paInt16
+from pyperclip import copy
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('whisperer.log')
+    ]
+)
 logger = logging.getLogger(__name__)
 
-# Load environment variables from .env file
-load_dotenv()
+# Constants
+CHUNK_SIZE = 8192
+SAMPLE_RATE = 16000
+CHANNELS = 1
+MAX_RESTART_ATTEMPTS = 5
+RESTART_DELAY = 5
 
-# Set up Groq client
-client = Groq(api_key=getenv("GROQ_API_KEY"))
+# Global variables and event for shutdown coordination
+should_exit = False
+shutdown_event = asyncio.Event()
+p = None
+client = None
+
+def setup_globals():
+    """Initialize global variables"""
+    global p, client
+    try:
+        load_dotenv()
+        client = Groq(api_key=getenv("GROQ_API_KEY"))
+        p = PyAudio()
+    except Exception as e:
+        logger.error(f"Failed to initialize globals: {e}")
+        raise
+
+def cleanup():
+    """Cleanup global resources"""
+    global p, should_exit, client
+    if p:
+        try:
+            p.terminate()
+            logger.info("Audio resources cleaned up")
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+    # Reset global objects
+    p = None
+    client = None
+    should_exit = True
+    logger.info("Cleanup completed, exiting...")
+
+def signal_handler(signum, frame):
+    """Handle system signals for graceful shutdown"""
+    global should_exit
+    signal_name = signal.Signals(signum).name
+    logger.info(f"\nReceived signal {signal_name}")
+    logger.info("Initiating graceful shutdown...")
+    should_exit = True
+    sys.exit(0)  # Немедленное завершение программы
+    
+    # Force exit after 5 seconds if graceful shutdown fails
+    def force_exit():
+        logger.warning("Forcing exit due to timeout...")
+        cleanup()
+        sys.exit(1)
+    
+    signal.signal(signum, signal.SIG_IGN)  # Ignore subsequent signals
+    signal.alarm(5)  # Set timeout for force exit
+    
+    try:
+        cleanup()
+    except Exception as e:
+        logger.error(f"Error during cleanup: {e}")
+    finally:
+        sys.exit(0)
+
+def setup_signal_handlers():
+    """Set up handlers for system signals"""
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    if hasattr(signal, 'SIGALRM'):  # Not available on Windows
+        signal.signal(signal.SIGALRM, lambda s, f: sys.exit(1))
+    logger.info("Signal handlers set up")
 
 # Global PyAudio instance
 p = PyAudio()
@@ -44,8 +120,12 @@ def audio_stream(sample_rate=SAMPLE_RATE, channels=CHANNELS, chunk=CHUNK_SIZE):
         )
         yield stream
     finally:
-        stream.stop_stream()
-        stream.close()
+        if not should_exit:  # Only try to close if we're not in exit process
+            try:
+                stream.stop_stream()
+                stream.close()
+            except Exception as e:
+                logger.error(f"Error closing audio stream: {e}")
 
 async def play_sound_async(sound_file):
     """Play sound asynchronously"""
@@ -55,35 +135,55 @@ async def play_sound_async(sound_file):
 
 async def record_audio():
     """Record audio from the microphone between two PAUSE button presses."""
-    frames = []
-    logger.info("Press PAUSE to start recording...")
+    global should_exit
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            frames = []
+            logger.info("Press PAUSE to start recording...")
 
-    wait("pause")
-    logger.info("Recording... (Press PAUSE again to stop)")
-    await play_sound_async("start.mp3")
+            wait("pause")
+            logger.info("Recording... (Press PAUSE again to stop)")
+            await play_sound_async("start.mp3")
 
-    stop_recording = False
-    def on_pause_press(e):
-        nonlocal stop_recording
-        stop_recording = True
-    
-    on_press_key("pause", on_pause_press)
+            stop_recording = False
+            def on_pause_press(e):
+                nonlocal stop_recording
+                stop_recording = True
+            
+            on_press_key("pause", on_pause_press)
 
-    try:
-        with audio_stream() as stream:
-            while not stop_recording:
-                try:
-                    data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
-                    frames.append(data)
-                except IOError as e:
-                    logger.warning(f"Audio buffer overflow: {e}")
-                    continue
-    except Exception as e:
-        logger.error(f"Error during recording: {e}")
-        return None, None
-    finally:
-        unhook_all()
-        await play_sound_async("stop.mp3")
+            try:
+                with audio_stream() as stream:
+                    no_data_count = 0
+                    while not stop_recording:
+                        try:
+                            data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
+                            if any(byte != 0 for byte in data):  # Check if audio data is not silent
+                                frames.append(data)
+                                no_data_count = 0
+                            else:
+                                no_data_count += 1
+                                if no_data_count > 100:  # Reset if prolonged silence
+                                    raise IOError("No audio data detected")
+                        except IOError as e:
+                            logger.warning(f"Audio buffer issue: {e}")
+                            await asyncio.sleep(0.1)
+                            continue
+                return frames, SAMPLE_RATE
+            finally:
+                unhook_all()
+                await play_sound_async("stop.mp3")
+                
+        except Exception as e:
+            logger.error(f"Recording attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                logger.info("Retrying recording...")
+                reset_audio()
+                await asyncio.sleep(1)
+            else:
+                logger.error("All recording attempts failed")
+                return None, None
 
     logger.info("Recording finished.")
     return frames, SAMPLE_RATE
@@ -169,16 +269,88 @@ async def process_recording():
     except Exception as e:
         logger.error(f"Error cleaning up temporary file: {e}")
 
-async def main():
+def reset_audio():
+    global p
     try:
-        while True:
-            await process_recording()
-            logger.info("\nReady for next recording. Press PAUSE to start.")
-
-    except KeyboardInterrupt:
-        logger.info("\nProgram terminated by user.")
-    finally:
         p.terminate()
+    except Exception:
+        pass
+    p = PyAudio()
+
+async def main():
+    """Main program loop"""
+    retries = 0
+    max_retries = 3
+    retry_delay = 5
+
+    try:
+        while not should_exit:
+            try:
+                await process_recording()
+                if should_exit:
+                    logger.info("Shutdown requested, stopping recording cycle")
+                    break
+                logger.info("\nReady for next recording. Press PAUSE to start.")
+                retries = 0
+            except KeyboardInterrupt:
+                logger.info("\nKeyboard interrupt received in main loop")
+                break
+            except Exception as e:
+                logger.error(f"Error in recording process: {e}")
+                if should_exit:
+                    break
+                retries += 1
+                if retries >= max_retries:
+                    logger.error(f"Max retries ({max_retries}) reached. Resetting systems...")
+                    reset_audio()
+                    retries = 0
+                await asyncio.sleep(retry_delay)
+    except asyncio.CancelledError:
+        logger.info("Main loop cancelled")
+    finally:
+        cleanup()
+        logger.info("Main loop completed")
+
+def run_with_auto_restart():
+    """Run the main loop with automatic restart on failure"""
+    global should_exit
+    restart_count = 0
+    while restart_count < MAX_RESTART_ATTEMPTS and not should_exit:
+        try:
+            logger.info(f"Starting whisperer (attempt {restart_count + 1})")
+            setup_globals()
+            setup_signal_handlers()
+            asyncio.run(main())
+            if should_exit:
+                logger.info("Clean shutdown requested")
+                break
+        except KeyboardInterrupt:
+            logger.info("\nKeyboard interrupt received in restart loop")
+            should_exit = True
+            break
+        except Exception as e:
+            if should_exit:
+                logger.info("Shutdown during error recovery")
+                break
+            restart_count += 1
+            logger.error(f"Critical error, restarting: {e}")
+            cleanup()
+            if restart_count < MAX_RESTART_ATTEMPTS:
+                logger.info(f"Restarting in {RESTART_DELAY} seconds...")
+                time.sleep(RESTART_DELAY)
+            else:
+                logger.error("Max restart attempts reached. Exiting.")
+                break
+    
+    logger.info("Program terminated")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        setup_signal_handlers()
+        run_with_auto_restart()
+    except KeyboardInterrupt:
+        logger.info("\nFinal keyboard interrupt caught")
+        should_exit = True
+    finally:
+        cleanup()
+        sys.exit(0)

@@ -33,3 +33,6 @@ ENV/
 .vscode/
 *.swp
 *.swo
+
+# Logging
+whisperer.log
