@@ -116,7 +116,7 @@ async def transcribe_audio(audio_file_path):
                 None,
                 lambda: client.audio.transcriptions.create(
                     file=(path.basename(audio_file_path), file.read()),
-                    model="whisper-large-v3-turbo",
+                    model="whisper-large-v3",
                     prompt="""The audio is by a programmer discussing programming issues, the programmer mostly uses python and might mention python libraries or reference code in his speech.""",
                     response_format="text",
                     language="ru",
