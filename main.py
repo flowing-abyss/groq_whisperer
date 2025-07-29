@@ -1,14 +1,14 @@
 import asyncio
 import logging
 import signal
+import struct
 import sys
 import time
-import wave
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from os import getenv, path, unlink
-from tempfile import NamedTemporaryFile
+from os import getenv
 
+import numpy as np
 from dotenv import load_dotenv
 from groq import Groq
 from pynput import keyboard
@@ -33,6 +33,10 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 MAX_RESTART_ATTEMPTS = 5
 RESTART_DELAY = 5
+MAX_RECORDING_DURATION = 300  # 5 minutes maximum recording
+MAX_FRAMES = int(SAMPLE_RATE * MAX_RECORDING_DURATION / CHUNK_SIZE)
+SILENCE_THRESHOLD = 500  # Amplitude threshold for silence detection
+MAX_SILENCE_CHUNKS = 100  # Maximum consecutive silent chunks before stopping
 
 # Global variables and event for shutdown coordination
 should_exit = False
@@ -53,6 +57,47 @@ def setup_globals():
     except Exception as e:
         logger.error(f"Failed to initialize globals: {e}")
         raise
+
+def detect_silence(data, threshold=SILENCE_THRESHOLD):
+    """Detect silence in audio data using amplitude analysis"""
+    try:
+        audio_data = np.frombuffer(data, dtype=np.int16)
+        max_amplitude = np.max(np.abs(audio_data))
+        return max_amplitude < threshold
+    except Exception:
+        # Fallback to simple check if numpy fails
+        return all(byte == 0 for byte in data[:100])  # Check first 100 bytes only
+
+def create_wav_data(frames, sample_rate):
+    """Create WAV file data in memory without using temporary files"""
+    if not frames:
+        return None
+    
+    # Combine all frames
+    audio_data = b"".join(frames)
+    
+    # WAV file header
+    sample_width = p.get_sample_size(paInt16)
+    num_frames = len(audio_data) // sample_width
+    
+    # Create WAV header
+    wav_header = struct.pack('<4sI4s4sIHHIIHH4sI',
+        b'RIFF',
+        36 + len(audio_data),  # File size
+        b'WAVE',
+        b'fmt ',
+        16,  # PCM header size
+        1,   # PCM format
+        CHANNELS,
+        sample_rate,
+        sample_rate * CHANNELS * sample_width,  # Byte rate
+        CHANNELS * sample_width,  # Block align
+        sample_width * 8,  # Bits per sample
+        b'data',
+        len(audio_data)
+    )
+    
+    return wav_header + audio_data
 
 def cleanup():
     """Cleanup global resources"""
@@ -76,16 +121,9 @@ def signal_handler(signum, frame):
     logger.info(f"\nReceived signal {signal_name}")
     logger.info("Initiating graceful shutdown...")
     should_exit = True
-    sys.exit(0)  # Немедленное завершение программы
     
-    # Force exit after 5 seconds if graceful shutdown fails
-    def force_exit():
-        logger.warning("Forcing exit due to timeout...")
-        cleanup()
-        sys.exit(1)
-    
-    signal.signal(signum, signal.SIG_IGN)  # Ignore subsequent signals
-    signal.alarm(5)  # Set timeout for force exit
+    # Ignore subsequent signals to prevent recursive calls
+    signal.signal(signum, signal.SIG_IGN)
     
     try:
         cleanup()
@@ -102,8 +140,8 @@ def setup_signal_handlers():
         signal.signal(signal.SIGALRM, lambda s, f: sys.exit(1))
     logger.info("Signal handlers set up")
 
-# Global PyAudio instance
-p = PyAudio()
+# Global PyAudio instance (initialized in setup_globals)
+p = None
 
 @contextmanager
 def audio_stream(sample_rate=SAMPLE_RATE, channels=CHANNELS, chunk=CHUNK_SIZE):
@@ -160,6 +198,11 @@ async def record_audio():
             stop_event = asyncio.Event()
             def on_press_stop(key):
                 if key == keyboard.Key.pause:
+                    # Play stop sound immediately when PAUSE is pressed (synchronously for instant response)
+                    try:
+                        playsound("stop.mp3", block=False)
+                    except Exception as e:
+                        logger.warning(f"Could not play stop sound: {e}")
                     loop.call_soon_threadsafe(stop_event.set)
                     return False # Stop this listener
 
@@ -168,29 +211,45 @@ async def record_audio():
 
             try:
                 with audio_stream() as stream:
-                    no_data_count = 0
-                    while not stop_event.is_set() and not should_exit:
+                    silence_count = 0
+                    frame_count = 0
+                    while not stop_event.is_set() and not should_exit and frame_count < MAX_FRAMES:
                         try:
                             data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
-                            if any(byte != 0 for byte in data):
-                                frames.append(data)
-                                no_data_count = 0
-                            else:
-                                no_data_count += 1
-                                if no_data_count > 100:
-                                    logger.warning("Prolonged silence detected, stopping.")
+                            frame_count += 1
+                            
+                            if detect_silence(data):
+                                silence_count += 1
+                                if silence_count > MAX_SILENCE_CHUNKS:
+                                    logger.info("Prolonged silence detected, stopping recording.")
                                     break
+                            else:
+                                frames.append(data)
+                                silence_count = 0
+                                
                         except IOError as e:
                             logger.warning(f"Audio buffer issue: {e}")
                             await asyncio.sleep(0.1)
-                        await asyncio.sleep(0.01) # Yield control
+                        
+                        # Reduced sleep for better responsiveness
+                        if frame_count % 10 == 0:  # Only yield every 10 frames
+                            await asyncio.sleep(0.001)
                 
                 stop_listener.join()
+                
+                # Log recording statistics
+                if frame_count >= MAX_FRAMES:
+                    logger.info(f"Recording stopped: maximum duration reached ({MAX_RECORDING_DURATION}s)")
+                elif silence_count > MAX_SILENCE_CHUNKS:
+                    logger.info("Recording stopped: prolonged silence detected")
+                else:
+                    logger.info(f"Recording completed: {len(frames)} frames captured")
+                
                 return frames, SAMPLE_RATE
             finally:
                 if stop_listener.is_alive():
                     stop_listener.stop()
-                await play_sound_async("stop.mp3")
+                # Stop sound is now played immediately when PAUSE is pressed
                 
         except Exception as e:
             logger.error(f"Recording attempt {attempt + 1} failed: {e}")
@@ -205,39 +264,21 @@ async def record_audio():
     logger.info("Recording finished.")
     return frames, SAMPLE_RATE
 
-async def save_audio(frames, sample_rate):
-    """Save recorded audio to a temporary WAV file."""
-    if not frames:
+async def transcribe_audio_from_memory(wav_data):
+    """Transcribe audio using Groq's Whisper implementation from memory data."""
+    if not wav_data:
         return None
         
     try:
-        with NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
-            with wave.open(temp_audio.name, "wb") as wf:
-                wf.setnchannels(CHANNELS)
-                wf.setsampwidth(p.get_sample_size(paInt16))
-                wf.setframerate(sample_rate)
-                wf.writeframes(b"".join(frames))
-            return temp_audio.name
-    except Exception as e:
-        logger.error(f"Error saving audio: {e}")
-        return None
-
-async def transcribe_audio(audio_file_path):
-    """Transcribe audio using Groq's Whisper implementation."""
-    if not audio_file_path:
-        return None
-        
-    try:
-        with open(audio_file_path, "rb") as file:
-            transcription = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: client.audio.transcriptions.create(
-                    file=(path.basename(audio_file_path), file.read()),
-                    model="whisper-large-v3",
-                    response_format="text",
-                    language="ru",
-                )
+        transcription = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: client.audio.transcriptions.create(
+                file=("audio.wav", wav_data),
+                model="whisper-large-v3",
+                response_format="text",
+                language="ru",
             )
+        )
         return transcription
     except Exception as e:
         logger.error(f"An error occurred during transcription: {str(e)}")
@@ -262,19 +303,21 @@ def _press_and_release_ctrl_v():
         controller.release('v')
 
 async def process_recording():
-    """Process a single recording cycle."""
+    """Process a single recording cycle using in-memory operations."""
     frames, sample_rate = await record_audio()
     if not frames:
         logger.warning("Recording failed. Trying again...")
         return
 
-    temp_audio_file = await save_audio(frames, sample_rate)
-    if not temp_audio_file:
-        logger.warning("Failed to save audio. Trying again...")
+    logger.info("Creating WAV data in memory...")
+    wav_data = create_wav_data(frames, sample_rate)
+    if not wav_data:
+        logger.warning("Failed to create WAV data. Trying again...")
         return
 
+    logger.info(f"Audio processed: {len(frames)} frames, {len(frames) * CHUNK_SIZE / SAMPLE_RATE:.1f}s duration")
     logger.info("Transcribing...")
-    transcription = await transcribe_audio(temp_audio_file)
+    transcription = await transcribe_audio_from_memory(wav_data)
 
     if transcription:
         logger.info("\nTranscription:")
@@ -284,12 +327,8 @@ async def process_recording():
         logger.info("Transcription copied and pasted.")
     else:
         logger.warning("Transcription failed.")
-
-    try:
-        if temp_audio_file and path.exists(temp_audio_file):
-            unlink(temp_audio_file)
-    except Exception as e:
-        logger.error(f"Error cleaning up temporary file: {e}")
+    
+    # No temporary file cleanup needed - everything was in memory!
 
 def reset_audio():
     global p
@@ -341,7 +380,6 @@ def run_with_auto_restart():
         try:
             logger.info(f"Starting whisperer (attempt {restart_count + 1})")
             setup_globals()
-            setup_signal_handlers()
             asyncio.run(main())
             if should_exit:
                 logger.info("Clean shutdown requested")
