@@ -11,7 +11,7 @@ from tempfile import NamedTemporaryFile
 
 from dotenv import load_dotenv
 from groq import Groq
-from keyboard import on_press_key, press_and_release, unhook_all, wait
+from pynput import keyboard
 from playsound3 import playsound
 from pyaudio import PyAudio, paInt16
 from pyperclip import copy
@@ -45,7 +45,10 @@ def setup_globals():
     global p, client
     try:
         load_dotenv()
-        client = Groq(api_key=getenv("GROQ_API_KEY"))
+        api_key = getenv("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY not found in environment variables.")
+        client = Groq(api_key=api_key)
         p = PyAudio()
     except Exception as e:
         logger.error(f"Failed to initialize globals: {e}")
@@ -102,11 +105,6 @@ def setup_signal_handlers():
 # Global PyAudio instance
 p = PyAudio()
 
-# Constants
-CHUNK_SIZE = 8192
-SAMPLE_RATE = 16000
-CHANNELS = 1
-
 @contextmanager
 def audio_stream(sample_rate=SAMPLE_RATE, channels=CHANNELS, chunk=CHUNK_SIZE):
     """Context manager for audio stream handling"""
@@ -136,43 +134,62 @@ async def play_sound_async(sound_file):
 async def record_audio():
     """Record audio from the microphone between two PAUSE button presses."""
     global should_exit
+    loop = asyncio.get_running_loop()
     max_retries = 3
     for attempt in range(max_retries):
         try:
             frames = []
             logger.info("Press PAUSE to start recording...")
 
-            wait("pause")
+            # Wait for the first PAUSE press to start
+            start_event = asyncio.Event()
+            def on_press_start(key):
+                if key == keyboard.Key.pause:
+                    loop.call_soon_threadsafe(start_event.set)
+                    return False  # Stop this listener
+
+            start_listener = keyboard.Listener(on_press=on_press_start)
+            start_listener.start()
+            await start_event.wait()
+            start_listener.join() # Ensure listener is stopped
+
             logger.info("Recording... (Press PAUSE again to stop)")
             await play_sound_async("start.mp3")
 
-            stop_recording = False
-            def on_pause_press(e):
-                nonlocal stop_recording
-                stop_recording = True
-            
-            on_press_key("pause", on_pause_press)
+            # Record and wait for the second PAUSE press to stop
+            stop_event = asyncio.Event()
+            def on_press_stop(key):
+                if key == keyboard.Key.pause:
+                    loop.call_soon_threadsafe(stop_event.set)
+                    return False # Stop this listener
+
+            stop_listener = keyboard.Listener(on_press=on_press_stop)
+            stop_listener.start()
 
             try:
                 with audio_stream() as stream:
                     no_data_count = 0
-                    while not stop_recording:
+                    while not stop_event.is_set() and not should_exit:
                         try:
                             data = stream.read(CHUNK_SIZE, exception_on_overflow=False)
-                            if any(byte != 0 for byte in data):  # Check if audio data is not silent
+                            if any(byte != 0 for byte in data):
                                 frames.append(data)
                                 no_data_count = 0
                             else:
                                 no_data_count += 1
-                                if no_data_count > 100:  # Reset if prolonged silence
-                                    raise IOError("No audio data detected")
+                                if no_data_count > 100:
+                                    logger.warning("Prolonged silence detected, stopping.")
+                                    break
                         except IOError as e:
                             logger.warning(f"Audio buffer issue: {e}")
                             await asyncio.sleep(0.1)
-                            continue
+                        await asyncio.sleep(0.01) # Yield control
+                
+                stop_listener.join()
                 return frames, SAMPLE_RATE
             finally:
-                unhook_all()
+                if stop_listener.is_alive():
+                    stop_listener.stop()
                 await play_sound_async("stop.mp3")
                 
         except Exception as e:
@@ -217,7 +234,6 @@ async def transcribe_audio(audio_file_path):
                 lambda: client.audio.transcriptions.create(
                     file=(path.basename(audio_file_path), file.read()),
                     model="whisper-large-v3",
-                    prompt="""The audio is by a programmer discussing programming issues, the programmer mostly uses python and might mention python libraries or reference code in his speech.""",
                     response_format="text",
                     language="ru",
                 )
@@ -234,10 +250,16 @@ async def copy_transcription_to_clipboard(text):
         
     try:
         copy(text)
-        await asyncio.sleep(0.1)  # Small delay to ensure text is copied
-        press_and_release('ctrl+v')
+        await asyncio.to_thread(_press_and_release_ctrl_v)
     except Exception as e:
         logger.error(f"Error during copy/paste: {str(e)}")
+
+def _press_and_release_ctrl_v():
+    """Helper function to press Ctrl+V, to be run in a separate thread."""
+    controller = keyboard.Controller()
+    with controller.pressed(keyboard.Key.ctrl):
+        controller.press('v')
+        controller.release('v')
 
 async def process_recording():
     """Process a single recording cycle."""

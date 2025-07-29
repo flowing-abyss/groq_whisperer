@@ -4,10 +4,11 @@
 
 ## Features
 
-- Record audio by pressing the **PAUSE** key
-- Transcribe recorded audio to text using Groq's API
-- Automatically copy transcription to clipboard
-- Continuous operation for multiple recordings
+- Record audio by pressing the **PAUSE** key.
+- Transcribe recorded audio to text using Groq's API.
+- Automatically copy transcription to clipboard and paste it.
+- Continuous operation for multiple recordings.
+- Optimized for faster transcription.
 
 ## Prerequisites
 
@@ -16,52 +17,54 @@
 
 ## Installation
 
-1. Clone the repository:
-   ```
-   git clone https://github.com/flowing-abyss/groq_whisperer
-   cd groq_whisperer
-   ```
+1.  Clone the repository:
+    ```bash
+    git clone https://github.com/flowing-abyss/groq_whisperer
+    cd groq_whisperer
+    ```
 
-2. Create a virtual environment:
-   ```
-   python -m venv .venv
-   ```
+2.  Create a virtual environment:
+    ```bash
+    python -m venv .venv
+    ```
 
-3. Activate the virtual environment:
-   - On Windows:
-     ```
-     .venv\Scripts\activate
-     ```
-   - On macOS and Linux:
-     ```
-     source .venv/bin/activate
-     ```
+3.  Activate the virtual environment:
+    - On Windows:
+      ```
+      .venv\Scripts\activate
+      ```
+    - On macOS and Linux:
+      ```
+      source .venv/bin/activate
+      ```
 
-4. Install the required packages:
-   ```
-   pip install -r requirements.txt
-   ```
+4.  Install the required packages:
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-5. Create a `.env` file and set the Groq API key in it:
-     ```
-     GROQ_API_KEY=api_key
-     ```
+5.  Create a `.env` file and set the Groq API key in it:
+    ```
+    GROQ_API_KEY=your_api_key_here
+    ```
 
 ## Usage
 
-1. Run the script:
-   ```
-   python main.py
-   ```
-   or
-   ```
-   run_background_admin.bat
-   ```
+1.  Run the script using the background launchers:
+    - On Windows:
+      ```
+      run_background.bat
+      ```
+    - On macOS and Linux:
+      ```
+      ./run_background.sh
+      ```
+    *Note: You may need to make the script executable on macOS/Linux: `chmod +x run_background.sh`*
 
-2. Press the "Pause" button to start recording.
-3. Press the "Pause" button to stop recording.
-4. The transcript will automatically be copied to the clipboard and can be pasted using Ctrl+V.
-5. Repeat steps 2-4 for additional recordings.
+2.  Press the **PAUSE** key to start recording.
+3.  Press the **PAUSE** key again to stop recording.
+4.  The transcript will automatically be copied to the clipboard and pasted into the active window.
+5.  Repeat steps 2-4 for additional recordings.
 
 ## Dependencies
 
